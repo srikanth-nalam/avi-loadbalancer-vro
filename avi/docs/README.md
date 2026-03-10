@@ -1,11 +1,11 @@
 # AVI Load Balancer — vRO CRUD Automation Package
 
-> **Full Create, Read, Update, Delete operations for AVI (NSX ALB) objects via VMware vRealize Orchestrator / ARIA Automation Orchestrator.**
+> **Full Create, Read, Update, Delete operations for AVI (NSX ALB) objects via VMware vRealize Orchestrator / ARIA Automation Orchestrator, invokable from ServiceNow.**
 
 **Compatible:** VCF 9 / vRO 8.x / ARIA Automation 8.x  
 **API Version:** AVI 22.1.x / 30.x (configurable)  
-**Author:** vRO Automation Team  
-**Version:** 1.0.0
+**Auth:** Session Cookies + CSRF Token  
+**Version:** 1.1.0
 
 ---
 
@@ -15,13 +15,14 @@
 3. [File Structure](#file-structure)
 4. [Prerequisites](#prerequisites)
 5. [Setup Instructions](#setup-instructions)
-6. [Workflow Inputs](#workflow-inputs)
-7. [Running the Demo](#running-the-demo)
-8. [What the Demo Does](#what-the-demo-does)
-9. [Individual Action Reference](#individual-action-reference)
-10. [Troubleshooting](#troubleshooting)
-11. [Extending the Package](#extending-the-package)
-12. [API Reference Links](#api-reference-links)
+6. [ServiceNow Integration](#servicenow-integration)
+7. [Workflow Inputs](#workflow-inputs)
+8. [Running the Demo](#running-the-demo)
+9. [What the Demo Does](#what-the-demo-does)
+10. [Individual Action Reference](#individual-action-reference)
+11. [Troubleshooting](#troubleshooting)
+12. [Extending the Package](#extending-the-package)
+13. [API Reference Links](#api-reference-links)
 
 ---
 
@@ -42,12 +43,23 @@ This package provides a **modular, production-ready** set of vRO Actions and a d
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                    vRO Workflow                       │
-│              aviCrudDemoWorkflow.js                   │
-│                                                      │
-│  LOGIN → CREATE → READ → UPDATE → DELETE → LOGOUT    │
-└──────────┬───────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                   ServiceNow Catalog                         │
+│  (User submits LB request → Flow Designer triggers vRO)     │
+└───────────────────────┬─────────────────────────────────────┘
+                        │  POST /vco/api/workflows/<id>/executions
+                        │  Body: { aviRequestPayload: "<json>" }
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    vRO Workflow                               │
+│              aviCrudDemoWorkflow.js                           │
+│                                                              │
+│  LOGIN → CREATE → READ → UPDATE → DELETE → LOGOUT            │
+│                                                              │
+│  Supports two invocation modes:                              │
+│    A) Individual vRO input params (manual runs)              │
+│    B) Single JSON payload (ServiceNow integration)           │
+└──────────┬──────────────────────────────────────────────────┘
            │  calls vRO Actions:
            │
            ├── aviAuth.js            (login, logout, CSRF, HTTP helper)
@@ -91,6 +103,8 @@ avi-vro-crud/
 3. **vRO 8.x / ARIA Orchestrator** with the REST plugin enabled (included by default)
 4. **Network connectivity** — vRO appliance must be able to reach the AVI Controller IP/FQDN
 5. **AVI API version** — Check your controller version at `https://<controller>/api/initial-data`
+6. **ServiceNow** (optional) — for catalog-driven automation
+7. **ServiceNow MID Server** (optional) — if AVI Controller is not directly reachable from ServiceNow
 
 ---
 
@@ -165,29 +179,147 @@ var createHealthMonitor = System.getModule("com.vmware.avi").createHealthMonitor
 
 ---
 
+## ServiceNow Integration
+
+### How It Works
+
+ServiceNow Flow Designer sends a JSON payload to the vRO workflow via the REST API. The workflow parses this payload and performs the requested operations on the AVI Controller.
+
+### ServiceNow → vRO Payload Format
+
+The workflow accepts a single `aviRequestPayload` string parameter containing a JSON object:
+
+```json
+{
+  "controllerIp": "avi-controller.lab.local",
+  "username": "admin",
+  "password": "admin123",
+  "apiVersion": "22.1.1",
+  "vipAddress": "10.0.1.100",
+  "subnetMask": 24,
+  "server1Ip": "10.0.1.10",
+  "server2Ip": "10.0.1.11",
+  "server3Ip": "10.0.1.12",
+  "serverPort": 80,
+  "servicePort": 80,
+  "cloudRef": "/api/cloud/<uuid>"
+}
+```
+
+### ServiceNow Flow Designer Configuration
+
+1. **Create a Catalog Item** in ServiceNow with fields:
+   - AVI Controller Host (string)
+   - VIP Address (string)
+   - Backend Server 1 IP (string)
+   - Backend Server 2 IP (string)
+   - Server Port (integer)
+   - Service Port (integer)
+   - API Version (string, default: 22.1.1)
+   - Cloud Ref (string, optional)
+
+2. **Create a Flow** in Flow Designer:
+   - **Trigger**: Service Catalog item submitted + approved
+   - **Step 1**: Script step — Build the aviRequestPayload JSON from catalog variables
+   - **Step 2**: REST step — Call vRO API:
+     ```
+     POST https://<vro-host>/vco/api/workflows/<workflow-id>/executions
+     Headers: Authorization: Basic <credentials>
+     Body:
+     {
+       "parameters": [{
+         "value": { "string": { "value": "<aviRequestPayload_json_string>" }},
+         "type": "string",
+         "name": "aviRequestPayload"
+       }]
+     }
+     ```
+   - **Step 3**: Script step — Parse response, update RITM with results
+
+3. **Build Payload Action** (reusable ServiceNow Action):
+   ```javascript
+   // ServiceNow Flow Designer Script Step
+   (function execute(inputs, outputs) {
+       var ritm = new GlideRecord('sc_req_item');
+       ritm.get(inputs.ritm_sys_id);
+
+       var vars = {};
+       var mtom = new GlideRecord('sc_item_option_mtom');
+       mtom.addQuery('request_item', ritm.sys_id);
+       mtom.query();
+       while (mtom.next()) {
+           var opt = mtom.sc_item_option.getRefRecord();
+           vars[opt.item_option_new.name.toString()] = opt.value.toString();
+       }
+
+       var payload = {
+           controllerIp: vars.avi_controller_host || '',
+           username:     vars.avi_username || 'admin',
+           password:     vars.avi_password || '',
+           apiVersion:   vars.api_version || '22.1.1',
+           vipAddress:   vars.vip_address || '',
+           subnetMask:   parseInt(vars.subnet_mask || '24'),
+           server1Ip:    vars.server1_ip || '',
+           server2Ip:    vars.server2_ip || '',
+           server3Ip:    vars.server3_ip || '',
+           serverPort:   parseInt(vars.server_port || '80'),
+           servicePort:  parseInt(vars.service_port || '80'),
+           cloudRef:     vars.cloud_ref || ''
+       };
+
+       // Wrap for vRO API format
+       var vroPayload = {
+           parameters: [{
+               value: { string: { value: JSON.stringify(payload) }},
+               type: "string",
+               name: "aviRequestPayload"
+           }]
+       };
+
+       outputs.payload_json = JSON.stringify(vroPayload);
+   })(inputs, outputs);
+   ```
+
+### Credential Best Practice
+
+Store AVI credentials in **vRO Configuration Elements** (not in ServiceNow):
+1. In vRO: Create a Config Element under `com.vmware.avi.config`
+2. Store: `controllerIp`, `username`, `password` (as SecureString)
+3. Modify the workflow to read credentials from config element instead of input params
+4. ServiceNow only needs to pass the LB request details (VIP, servers, ports)
+
+---
+
 ## Workflow Inputs
 
-### Required Inputs (minimum to run the demo)
+### Option A: Direct vRO Execution (Individual Parameters)
 
-| Parameter      | Example Value              | Notes                                    |
-|----------------|----------------------------|------------------------------------------|
-| controllerIp   | `avi-controller.lab.local` | FQDN or IP of your AVI controller        |
-| username        | `admin`                    | AVI admin user                           |
-| password        | `********`                 | SecureString in vRO                      |
-| vipAddress      | `10.0.1.100`               | Must be a free IP in the target subnet   |
-| server1Ip       | `10.0.1.10`                | Must be a reachable backend server       |
-| server2Ip       | `10.0.1.11`                | Must be a reachable backend server       |
+| Name            | Type         | Required | Description                         |
+|-----------------|--------------|----------|-------------------------------------|
+| controllerIp    | string       | Yes      | AVI Controller IP or FQDN          |
+| username         | string       | Yes      | Admin username                      |
+| password         | SecureString | Yes      | Admin password                      |
+| apiVersion       | string       | No       | API version (default: "22.1.1")     |
+| vipAddress       | string       | Yes      | Virtual IP (e.g., 10.0.1.100)      |
+| subnetMask       | number       | No       | Subnet mask CIDR (default: 24)      |
+| server1Ip        | string       | Yes      | Backend server 1 IP                 |
+| server2Ip        | string       | Yes      | Backend server 2 IP                 |
+| server3Ip        | string       | No       | Server 3 (added during UPDATE)      |
+| serverPort       | number       | No       | Backend port (default: 80)          |
+| servicePort      | number       | No       | Frontend port (default: 80)         |
+| cloudRef         | string       | No       | Cloud ref URL (optional)            |
 
-### Optional Inputs
+### Option B: ServiceNow Invocation (Single JSON Payload)
 
-| Parameter      | Default    | Notes                                          |
-|----------------|------------|------------------------------------------------|
-| apiVersion     | `22.1.1`   | Match your AVI controller version              |
-| subnetMask     | `24`       | CIDR notation                                  |
-| server3Ip      | (empty)    | If provided, added during the UPDATE step      |
-| serverPort     | `80`       | Backend server listening port                  |
-| servicePort    | `80`       | Frontend virtual service port                  |
-| cloudRef       | (empty)    | Required in multi-cloud setups                 |
+| Name               | Type   | Required | Description                                 |
+|--------------------|--------|----------|---------------------------------------------|
+| aviRequestPayload  | string | Yes      | JSON string with all parameters above       |
+
+### Workflow Output
+
+| Name       | Type   | Description                              |
+|------------|--------|------------------------------------------|
+| demoResult | string | JSON summary of all CRUD operations      |
 
 ---
 
@@ -387,12 +519,6 @@ var dnsHm = createHealthMonitor(
     30, 10, 3, 2, null, null
 );
 ```
-
-### Integrate with ServiceNow Catalog
-1. Create a ServiceNow Catalog Item with fields for VIP, servers, port
-2. Use the vRO REST plugin or ARIA → ServiceNow integration to trigger this workflow
-3. Pass ServiceNow form values as workflow inputs
-4. Return the `demoResult` JSON back to ServiceNow as a catalog task output
 
 ### Integrate with vRA / ARIA Automation
 1. Import the workflow into ARIA Automation Orchestrator

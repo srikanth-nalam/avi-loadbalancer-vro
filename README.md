@@ -29,7 +29,7 @@ avi/
 │   ├── aviVsVip.js              # Virtual IP CRUD
 │   └── aviVirtualService.js     # Virtual Service CRUD + runtime status
 ├── workflows/
-│   └── aviCrudDemoWorkflow.js   # E2E demo: Login → Create → Read → Update → Delete → Logout
+│   └── aviCrudDemoWorkflow.js   # E2E demo (ServiceNow-compatible JSON payload)
 └── docs/
     └── README.md                # Full setup & testing guide
 ```
@@ -56,13 +56,30 @@ f5/
 
 ## ServiceNow Integration
 
-Both workflows support invocation from **ServiceNow Flow Designer** via the vRO REST API:
+Both workflows support invocation from **ServiceNow Flow Designer** via the vRO REST API using a single JSON payload parameter:
+
+| Load Balancer | Payload Parameter     | Guide |
+|---------------|-----------------------|-------|
+| **AVI (NSX ALB)** | `aviRequestPayload`  | [AVI ServiceNow Integration Guide](./avi/docs/README.md#servicenow-integration) |
+| **F5 BIG-IP LTM** | `f5RequestPayload`   | [F5 ServiceNow Integration Guide](./f5/docs/README.md#servicenow-integration) |
+
+### Invocation Pattern
 
 ```
 POST https://<vro-host>/vco/api/workflows/<workflow-id>/executions
 Content-Type: application/json
 Authorization: Basic <credentials>
 
+// AVI example:
+{
+  "parameters": [{
+    "value": { "string": { "value": "<json-payload>" }},
+    "type": "string",
+    "name": "aviRequestPayload"
+  }]
+}
+
+// F5 example:
 {
   "parameters": [{
     "value": { "string": { "value": "<json-payload>" }},
@@ -72,7 +89,7 @@ Authorization: Basic <credentials>
 }
 ```
 
-The F5 workflow natively supports a single JSON payload parameter (`f5RequestPayload`) designed for ServiceNow catalog integration. See the [F5 ServiceNow Integration Guide](./f5/docs/README.md#servicenow-integration) for complete instructions including Flow Designer script, catalog item setup, and credential management.
+Both workflows support dual-input mode: individual vRO parameters (for direct runs) or a single JSON payload string (for ServiceNow integration). See each guide for complete instructions including Flow Designer scripts, catalog item setup, and credential management.
 
 ---
 

@@ -4,6 +4,11 @@
  * End-to-end workflow that demonstrates full CRUD lifecycle for
  * AVI Load Balancer objects via the REST API from vRO.
  *
+ * Designed to be invoked from ServiceNow via the vRO REST API:
+ *   POST /vco/api/workflows/<workflow-id>/executions
+ *   Body: { "parameters": [{ "value": { "string": { "value": "<json>" }},
+ *           "type": "string", "name": "aviRequestPayload" }] }
+ *
  * Flow:
  *   1. LOGIN         → Authenticate to AVI Controller
  *   2. CREATE         → Health Monitor → Pool → VsVip → Virtual Service
@@ -14,12 +19,14 @@
  *   7. LOGOUT         → End session
  *
  * @module com.vmware.avi.demo
- * @version 1.0.0
+ * @version 1.1.0
  * @compatible VCF 9 / vRO 8.x
  *
  * ========================================================================
  * WORKFLOW INPUTS (configure in vRO Workflow Designer):
  * ========================================================================
+ *
+ * Option A — Individual parameters (for direct vRO runs):
  *   controllerIp    (string)       - AVI Controller IP or FQDN
  *   username         (string)       - Admin username
  *   password         (SecureString) - Admin password
@@ -32,6 +39,10 @@
  *   serverPort       (number)       - Backend server port (default: 80)
  *   servicePort      (number)       - Frontend service port (default: 80)
  *   cloudRef         (string)       - Cloud ref URL (optional, e.g., "/api/cloud/<uuid>")
+ *
+ * Option B — Single JSON payload (for ServiceNow invocation):
+ *   aviRequestPayload (string)      - JSON string containing all the above.
+ *                                      ServiceNow catalog sends this via vRO API.
  *
  * WORKFLOW OUTPUT:
  *   demoResult       (string)       - JSON summary of all operations performed
@@ -53,25 +64,43 @@
 (function () {
 
     // ====================================================================
-    // CONFIGURATION — These map to vRO Workflow Input Parameters
+    // CONFIGURATION — Parse inputs (supports both direct params and JSON)
     // ====================================================================
-    // In vRO: Bind these to workflow input parameters in the Schema tab.
-    // For standalone testing, you can hardcode values here temporarily.
 
-    var config = {
-        controllerIp: controllerIp,     // Workflow input
-        username: username,             // Workflow input
-        password: password,             // Workflow input (SecureString)
-        apiVersion: apiVersion || "22.1.1",
-        vipAddress: vipAddress,         // Workflow input
-        subnetMask: subnetMask || 24,
-        server1Ip: server1Ip,           // Workflow input
-        server2Ip: server2Ip,           // Workflow input
-        server3Ip: server3Ip || "",     // Workflow input (for update step)
-        serverPort: serverPort || 80,
-        servicePort: servicePort || 80,
-        cloudRef: cloudRef || ""        // Workflow input (optional)
-    };
+    var config = {};
+
+    // Option B: ServiceNow sends a single JSON payload string
+    if (typeof aviRequestPayload !== "undefined" && aviRequestPayload && aviRequestPayload.trim() !== "") {
+        System.log("[aviCrudDemo] Parsing aviRequestPayload from ServiceNow...");
+        try {
+            config = JSON.parse(aviRequestPayload);
+        } catch (e) {
+            throw new Error("Failed to parse aviRequestPayload JSON: " + e.message);
+        }
+    } else {
+        // Option A: Individual workflow input parameters
+        config = {
+            controllerIp: controllerIp,
+            username:     username,
+            password:     password,
+            apiVersion:   apiVersion || "22.1.1",
+            vipAddress:   vipAddress,
+            subnetMask:   subnetMask || 24,
+            server1Ip:    server1Ip,
+            server2Ip:    server2Ip,
+            server3Ip:    server3Ip || "",
+            serverPort:   serverPort || 80,
+            servicePort:  servicePort || 80,
+            cloudRef:     cloudRef || ""
+        };
+    }
+
+    // Apply defaults (works for both input modes)
+    config.apiVersion  = config.apiVersion || "22.1.1";
+    config.subnetMask  = config.subnetMask || 24;
+    config.serverPort  = config.serverPort || 80;
+    config.servicePort = config.servicePort || 80;
+    config.cloudRef    = config.cloudRef || "";
 
     // Demo naming convention — easy to identify + clean up
     var DEMO_PREFIX = "vRO-Demo-";
